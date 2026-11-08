@@ -72,6 +72,7 @@
   .hint { font-weight: 400; font-size: .85rem; opacity: .7; }
   .invalid { border-color: var(--err) !important; }
   .photos { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .slot { display: grid; gap: 6px; align-content: start; }
   .photo {
     position: relative;
     aspect-ratio: 1;
@@ -82,11 +83,30 @@
     overflow: hidden;
     text-align: center;
     font-size: .85rem;
-    cursor: pointer;
   }
-  .photo:hover { border-color: var(--gold); }
-  .photo input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
   .photo img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .photo .info {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,.65); color: #fff;
+    font-size: .72rem; padding: 2px 4px;
+  }
+  .photo .quitar {
+    position: absolute; top: 4px; right: 4px;
+    width: 28px; height: 28px; padding: 0;
+    border-radius: 50%;
+    background: rgba(0,0,0,.65);
+    font-size: 1.1rem; line-height: 1;
+  }
+  .pbtns { display: grid; gap: 6px; }
+  .pbtns button {
+    background: transparent;
+    color: var(--ink);
+    border: 1px solid var(--line);
+    padding: 8px 6px;
+    font-size: .85rem;
+    font-weight: 500;
+  }
+  .pbtns button:hover { border-color: var(--gold); }
   button {
     font: inherit;
     font-weight: 600;
@@ -157,11 +177,7 @@
 
     <div>
       <div style="font-weight:500;margin-bottom:6px">Fotos <span class="hint">(hasta 3)</span></div>
-      <div class="photos">
-        <label class="photo"><span>Foto 1</span><input type="file" accept="image/*" data-i="0"></label>
-        <label class="photo"><span>Foto 2</span><input type="file" accept="image/*" data-i="1"></label>
-        <label class="photo"><span>Foto 3</span><input type="file" accept="image/*" data-i="2"></label>
-      </div>
+      <div class="photos" id="photos"></div>
     </div>
 
     <button type="submit" id="btn">Guardar artículo</button>
@@ -173,29 +189,88 @@
   // ====== CONFIGURACIÓN ======
   const API_URL = 'https://script.google.com/macros/s/AKfycbwP4jf0XkroYh-KZ9ywWKFmDGf7U9d2t8VCiT_es1eH-OQLfQeYYx9J0V0daHVjas8WjA/exec';   // termina en /exec
   let clave = sessionStorage.getItem('clave') || ''; // se pide al abrir; dura mientras la pestaña esté abierta
-  const MAX_SIDE = 1400;                            // lado máximo de la foto (px)
+  const MAX_SIDE  = 1600;   // lado más largo máximo de la foto (px)
+  const MIN_SIDE  = 1000;   // no se reduce por debajo de este tamaño
+  const TARGET_KB = 600;    // peso objetivo por foto
+  const QUALITIES = [0.9, 0.82, 0.75, 0.7]; // calidad JPEG: se baja solo si hace falta
 
   const $ = (id) => document.getElementById(id);
   const money = /^\d+(\.\d{1,2})?$/;
-  const files = [null, null, null];
+  const photos = [null, null, null];   // { mime, base64, kb, blob }
+  let pending = 0;                     // fotos que se están procesando
 
-  // Vista previa de fotos
-  document.querySelectorAll('.photo input').forEach((inp) => {
-    inp.addEventListener('change', () => {
-      const i = +inp.dataset.i;
-      const file = inp.files[0] || null;
-      files[i] = file;
-      const box = inp.parentElement;
-      const old = box.querySelector('img');
-      if (old) old.remove();
-      if (file) {
-        const img = document.createElement('img');
-        img.alt = 'Vista previa de la foto ' + (i + 1);
-        img.src = URL.createObjectURL(file);
-        box.appendChild(img);
-      }
+  // ====== Fotos: cámara o galería ======
+  const photosBox = $('photos');
+  for (let i = 0; i < 3; i++) {
+    const slot = document.createElement('div');
+    slot.className = 'slot';
+    slot.dataset.i = i;
+    slot.innerHTML =
+      '<div class="photo"><span>Foto ' + (i + 1) + '</span></div>' +
+      '<div class="pbtns">' +
+        '<button type="button" data-act="cam">Cámara</button>' +
+        '<button type="button" data-act="gal">Galería</button>' +
+      '</div>' +
+      '<input type="file" accept="image/*" capture="environment" hidden data-src="cam">' +
+      '<input type="file" accept="image/*" hidden data-src="gal">';
+    photosBox.appendChild(slot);
+
+    slot.querySelectorAll('button').forEach((b) => {
+      b.addEventListener('click', () => {
+        slot.querySelector('input[data-src="' + b.dataset.act + '"]').click();
+      });
     });
-  });
+    slot.querySelectorAll('input[type=file]').forEach((inp) => {
+      inp.addEventListener('change', () => {
+        const file = inp.files[0];
+        inp.value = '';               // permite elegir la misma foto otra vez
+        if (file) setPhoto(i, file);
+      });
+    });
+  }
+
+  function previewBox(i) {
+    return photosBox.querySelector('.slot[data-i="' + i + '"] .photo');
+  }
+
+  async function setPhoto(i, file) {
+    const box = previewBox(i);
+    box.innerHTML = '<span>Procesando…</span>';
+    pending++;
+    try {
+      photos[i] = await compress(file);
+      renderPhoto(i);
+    } catch (err) {
+      photos[i] = null;
+      renderPhoto(i);
+      show(err.message, 'err');
+    } finally {
+      pending--;
+    }
+  }
+
+  function renderPhoto(i) {
+    const box = previewBox(i);
+    const p = photos[i];
+    box.innerHTML = '';
+    if (!p) {
+      box.innerHTML = '<span>Foto ' + (i + 1) + '</span>';
+      return;
+    }
+    const img = new Image();
+    img.alt = 'Vista previa de la foto ' + (i + 1);
+    img.src = URL.createObjectURL(p.blob);
+    const info = document.createElement('div');
+    info.className = 'info';
+    info.textContent = p.kb + ' KB';
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.className = 'quitar';
+    x.textContent = '×';
+    x.setAttribute('aria-label', 'Quitar foto ' + (i + 1));
+    x.addEventListener('click', () => { photos[i] = null; renderPhoto(i); });
+    box.append(img, info, x);
+  }
 
   // Solo permite dígitos y un punto con máximo 2 decimales
   ['costo', 'precio'].forEach((id) => {
@@ -208,22 +283,65 @@
     });
   });
 
-  // Reduce la foto y la convierte a base64 (JPEG)
-  function compress(file) {
+  // ====== Compresión ======
+  // Carga la imagen respetando la rotación de la cámara (EXIF)
+  async function loadImage(file) {
+    if (window.createImageBitmap) {
+      try { return await createImageBitmap(file, { imageOrientation: 'from-image' }); }
+      catch (e) { /* se usa el método clásico */ }
+    }
     return new Promise((resolve, reject) => {
       const img = new Image();
-      img.onload = () => {
-        const scale = Math.min(1, MAX_SIDE / Math.max(img.width, img.height));
-        const c = document.createElement('canvas');
-        c.width = Math.round(img.width * scale);
-        c.height = Math.round(img.height * scale);
-        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-        const dataUrl = c.toDataURL('image/jpeg', 0.85);
-        resolve({ mime: 'image/jpeg', base64: dataUrl.split(',')[1] });
-      };
-      img.onerror = () => reject(new Error('No se pudo leer una de las imágenes'));
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('No se pudo leer la imagen'));
       img.src = URL.createObjectURL(file);
     });
+  }
+
+  const toBlob = (canvas, q) => new Promise((res) => canvas.toBlob(res, 'image/jpeg', q));
+
+  const blobToBase64 = (blob) => new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(',')[1]);
+    r.onerror = () => reject(new Error('No se pudo procesar la imagen'));
+    r.readAsDataURL(blob);
+  });
+
+  // Primero prueba con buena calidad; si pesa más que TARGET_KB baja la calidad
+  // un poco y, si aún pesa de más, reduce las dimensiones (nunca bajo MIN_SIDE).
+  async function compress(file) {
+    const src = await loadImage(file);
+    const w0 = src.width, h0 = src.height;
+    let side = Math.min(MAX_SIDE, Math.max(w0, h0));
+    let blob = null;
+
+    while (true) {
+      const scale = Math.min(1, side / Math.max(w0, h0));
+      const c = document.createElement('canvas');
+      c.width = Math.round(w0 * scale);
+      c.height = Math.round(h0 * scale);
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, c.width, c.height);
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(src, 0, 0, c.width, c.height);
+
+      for (const q of QUALITIES) {
+        blob = await toBlob(c, q);
+        if (blob && blob.size <= TARGET_KB * 1024) break;
+      }
+      if (!blob) throw new Error('No se pudo comprimir la imagen');
+      if (blob.size <= TARGET_KB * 1024 || side <= MIN_SIDE) break;
+      side = Math.max(MIN_SIDE, Math.round(side * 0.85));
+    }
+    if (src.close) src.close();
+
+    return {
+      mime: 'image/jpeg',
+      base64: await blobToBase64(blob),
+      kb: Math.round(blob.size / 1024),
+      blob
+    };
   }
 
   function show(text, cls) {
@@ -298,13 +416,17 @@
       return;
     }
 
+    if (pending > 0) {
+      show('Espera un momento: se están procesando las fotos.', 'err');
+      return;
+    }
+
     const btn = $('btn');
     btn.disabled = true;
     show('Guardando…');
 
     try {
-      const imagenes = [];
-      for (const f of files) if (f) imagenes.push(await compress(f));
+      const imagenes = photos.filter(Boolean).map((p) => ({ mime: p.mime, base64: p.base64 }));
 
       // text/plain evita la petición previa (preflight) que Apps Script no soporta
       const res = await fetch(API_URL, {
@@ -317,8 +439,8 @@
 
       show('Guardado como ' + out.id, 'ok');
       $('f').reset();
-      document.querySelectorAll('.photo img').forEach((i) => i.remove());
-      files.fill(null);
+      photos.fill(null);
+      for (let i = 0; i < 3; i++) renderPhoto(i);
     } catch (err) {
       if (err.message === 'No autorizado') {
         lock();
